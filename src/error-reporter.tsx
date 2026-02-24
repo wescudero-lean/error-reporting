@@ -27,6 +27,7 @@ declare global {
   interface Window {
     __tixlyErrorReporterInitialized?: boolean;
     __tixlyErrorReporterAPI?: ErrorReporterAPI;
+    __tixlyErrorReporterDotEnvPath?: string;
   }
 }
 
@@ -50,6 +51,178 @@ function deriveProjectKey() {
 }
 function deriveReportedBy() {
   return localStorage.getItem("tixly_user_name") || "Anonymous";
+}
+
+const CLICKUP_PROJECT_ID_ENV = "VITE_CLICKUP_PROJECT_ID";
+const CLICKUP_PROJECT_ID_ENV_FALLBACK = "VITE_CLICKUP_PROJECT_ID";
+
+function readRuntimeEnv(name: string): string | null {
+  try {
+    const metaEnv = (import.meta as any)?.env;
+    if (metaEnv && typeof metaEnv[name] === "string" && metaEnv[name].trim())
+      return metaEnv[name].trim();
+  } catch {}
+
+  try {
+    const proc = (globalThis as any).process;
+    if (
+      proc?.env &&
+      typeof proc.env[name] === "string" &&
+      proc.env[name].trim()
+    )
+      return proc.env[name].trim();
+  } catch {}
+
+  return null;
+}
+
+function readDotEnvVariable(name: string): string | null {
+  const req = (globalThis as any).require as undefined | ((id: string) => any);
+  const proc = (globalThis as any).process as any;
+
+  if (!req || !proc?.cwd) return null;
+
+  let fs: any;
+  let path: any;
+  try {
+    fs = req("fs");
+    path = req("path");
+  } catch {
+    return null;
+  }
+
+  const envPath =
+    (globalThis as any).__tixlyErrorReporterDotEnvPath ||
+    path.join(proc.cwd(), ".env");
+
+  try {
+    if (!fs.existsSync(envPath)) return null;
+    const fileText = fs.readFileSync(envPath, "utf8") as string;
+    const lines = fileText.split(/\r?\n/);
+    const matcher = new RegExp(
+      `^\\s*(?:export\\s+)?${name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}\\s*=\\s*(.*)\\s*$`,
+    );
+
+    for (const line of lines) {
+      if (!line || line.trim().startsWith("#")) continue;
+      const m = matcher.exec(line);
+      if (!m) continue;
+      const raw = (m[1] || "").trim();
+      if (!raw) return null;
+      if (
+        (raw.startsWith('"') && raw.endsWith('"')) ||
+        (raw.startsWith("'") && raw.endsWith("'"))
+      ) {
+        try {
+          return JSON.parse(raw);
+        } catch {
+          return raw.slice(1, -1);
+        }
+      }
+      return raw;
+    }
+
+    return null;
+  } catch {
+    return null;
+  }
+}
+
+function readConfiguredClickUpProjectId(): string | null {
+  const fromRuntime = readRuntimeEnv(CLICKUP_PROJECT_ID_ENV);
+  if (fromRuntime) return fromRuntime;
+
+  const fromRuntimeFallback = readRuntimeEnv(CLICKUP_PROJECT_ID_ENV_FALLBACK);
+  if (fromRuntimeFallback) return fromRuntimeFallback;
+
+  const fromDotEnv = readDotEnvVariable(CLICKUP_PROJECT_ID_ENV);
+  if (fromDotEnv?.trim()) return fromDotEnv.trim();
+
+  const fromDotEnvFallback = readDotEnvVariable(CLICKUP_PROJECT_ID_ENV_FALLBACK);
+  if (fromDotEnvFallback?.trim()) return fromDotEnvFallback.trim();
+
+  try {
+    const fromStorage =
+      localStorage.getItem(CLICKUP_PROJECT_ID_ENV) ||
+      localStorage.getItem(CLICKUP_PROJECT_ID_ENV_FALLBACK);
+    return fromStorage?.trim() || null;
+  } catch {
+    return null;
+  }
+}
+
+async function writeDotEnvVariable(
+  name: string,
+  value: string,
+): Promise<{ ok: boolean; error?: string }> {
+  const req = (globalThis as any).require as undefined | ((id: string) => any);
+  const proc = (globalThis as any).process as any;
+
+  if (!req || !proc?.cwd) {
+    return { ok: false, error: "dotEnvWriteUnavailable" };
+  }
+
+  let fs: any;
+  let path: any;
+  try {
+    fs = req("fs");
+    path = req("path");
+  } catch {
+    return { ok: false, error: "dotEnvWriteUnavailable" };
+  }
+
+  const envPath =
+    (globalThis as any).__tixlyErrorReporterDotEnvPath ||
+    path.join(proc.cwd(), ".env");
+
+  let fileText = "";
+  let newline = "\n";
+  try {
+    if (fs.existsSync(envPath)) {
+      fileText = fs.readFileSync(envPath, "utf8") as string;
+      newline = fileText.includes("\r\n") ? "\r\n" : "\n";
+    }
+  } catch {
+    return { ok: false, error: "dotEnvReadFailed" };
+  }
+
+  const formatValue = (raw: string) => {
+    const trimmed = raw.trim();
+    const needsQuotes =
+      trimmed === "" ||
+      /[\s#"'\r\n]/.test(trimmed) ||
+      trimmed.includes("=");
+    return needsQuotes ? JSON.stringify(trimmed) : trimmed;
+  };
+
+  const lines = fileText ? fileText.split(/\r?\n/) : [];
+  const pattern = new RegExp(`^\\s*${name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}\\s*=`);
+  const existingIndex = lines.findIndex((l) => pattern.test(l));
+
+  if (!value.trim()) {
+    if (existingIndex !== -1) lines.splice(existingIndex, 1);
+  } else {
+    const nextLine = `${name}=${formatValue(value)}`;
+    if (existingIndex === -1) {
+      if (lines.length > 0 && lines[lines.length - 1]?.trim() !== "") {
+        lines.push(nextLine);
+      } else if (lines.length > 0 && lines[lines.length - 1]?.trim() === "") {
+        lines.splice(lines.length - 1, 0, nextLine);
+      } else {
+        lines.push(nextLine);
+      }
+    } else {
+      lines[existingIndex] = nextLine;
+    }
+  }
+
+  const nextText = lines.join(newline).replace(/\s+$/g, "") + newline;
+  try {
+    fs.writeFileSync(envPath, nextText, "utf8");
+    return { ok: true };
+  } catch {
+    return { ok: false, error: "dotEnvWriteFailed" };
+  }
 }
 
 function createEl<K extends keyof HTMLElementTagNameMap>(
@@ -250,6 +423,208 @@ function renderStyles(): HTMLStyleElement {
     .er-loading { background: hsla(var(--primary, 195 100% 43%), 0.05); color: var(--er-primary); }
     
     .er-hidden { display: none !important; }
+
+    .er-modal-overlay {
+      position: fixed;
+      inset: 0;
+      background: radial-gradient(
+          circle at 50% 10%,
+          rgba(2, 132, 199, 0.1),
+          rgba(15, 23, 42, 0.2) 40%,
+          rgba(2, 6, 23, 0.45)
+        );
+      backdrop-filter: blur(2px);
+      -webkit-backdrop-filter: blur(2px);
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      z-index: 100000;
+      padding: 20px;
+      animation: er-fade-in 0.2s ease-out;
+    }
+
+    .er-modal {
+      width: min(440px, calc(100vw - 40px));
+      background: hsla(var(--background, 0 0% 100%), 0.95);
+      backdrop-filter: blur(20px) saturate(180%);
+      -webkit-backdrop-filter: blur(20px) saturate(180%);
+      border: 1px solid hsla(var(--border, 214.3 31.8% 91.4%), 0.8);
+      border-radius: calc(var(--er-radius) + 4px);
+      box-shadow:
+        0 20px 60px -10px rgba(0, 0, 0, 0.25),
+        0 0 0 1px rgba(255, 255, 255, 0.5) inset;
+      overflow: hidden;
+      animation: er-modal-scale 0.25s cubic-bezier(0.16, 1, 0.3, 1);
+      display: flex;
+      flex-direction: column;
+    }
+
+    .er-modal-header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 20px 24px 16px;
+      background: transparent;
+    }
+
+    .er-modal-title {
+      display: flex;
+      gap: 12px;
+      align-items: flex-start;
+    }
+
+    .er-modal-icon {
+      width: 36px;
+      height: 36px;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      border-radius: 10px;
+      background: linear-gradient(135deg, hsla(var(--primary, 195 100% 43%), 0.1), hsla(var(--primary, 195 100% 43%), 0.05));
+      color: var(--er-primary);
+      border: 1px solid hsla(var(--primary, 195 100% 43%), 0.1);
+      box-shadow: 0 2px 4px rgba(0,0,0,0.02);
+      flex-shrink: 0;
+    }
+    .er-modal-icon svg { width: 18px; height: 18px; }
+
+    .er-modal-title-text { display: flex; flex-direction: column; gap: 3px; }
+    .er-modal-title-text span:first-child {
+      font-weight: 600;
+      font-size: 16px;
+      color: var(--er-foreground);
+      line-height: 1.2;
+    }
+    .er-modal-subtitle {
+      font-size: 13px;
+      color: var(--er-muted-foreground);
+      font-weight: 400;
+      line-height: 1.4;
+    }
+
+    .er-modal .er-body {
+      padding: 8px 24px 24px;
+      display: flex;
+      flex-direction: column;
+      gap: 16px;
+    }
+
+    .er-hint-row {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+    }
+    .er-env-chip {
+      display: none;
+    }
+
+    .er-modal .er-label {
+      font-size: 13px;
+      font-weight: 500;
+      color: var(--er-foreground);
+      font-family: inherit;
+    }
+
+    .er-modal .er-input {
+      padding: 12px 14px;
+      font-size: 14px;
+      border-radius: 10px;
+      border: 1px solid hsla(var(--border, 214.3 31.8% 91.4%), 1);
+      background: #fff;
+      box-shadow: 0 1px 2px rgba(0, 0, 0, 0.04);
+      transition: all 0.2s ease;
+      color: var(--er-foreground);
+      font-family: inherit;
+    }
+    .er-modal .er-input::placeholder { color: hsla(var(--muted-foreground, 208 20% 45%), 0.6); }
+    .er-modal .er-input:focus {
+      outline: none;
+      border-color: var(--er-primary);
+      box-shadow: 0 0 0 4px hsla(var(--primary, 195 100% 43%), 0.15);
+    }
+
+    .er-help {
+      font-size: 13px;
+      color: var(--er-muted-foreground);
+      line-height: 1.5;
+      font-family: inherit;
+    }
+
+    .er-inline-status {
+      font-size: 13px;
+      color: var(--er-primary);
+      font-weight: 500;
+      min-height: 20px;
+      display: flex;
+      align-items: center;
+      font-family: inherit;
+    }
+
+    .er-modal .er-footer {
+      padding: 16px 24px;
+      background: hsla(var(--muted, 210 20% 96%), 0.3);
+      border-top: 1px solid hsla(var(--border, 214.3 31.8% 91.4%), 0.6);
+      display: flex;
+      justify-content: flex-end;
+      gap: 12px;
+    }
+
+    .er-modal .er-btn {
+      border-radius: 8px;
+      padding: 10px 18px;
+      font-weight: 500;
+      font-size: 14px;
+      transition: all 0.2s cubic-bezier(0.2, 0.8, 0.2, 1);
+      border: 1px solid transparent;
+      font-family: inherit;
+    }
+    
+    .er-modal .er-btn:not(.primary) {
+      background: var(--er-bg);
+      border-color: var(--er-border);
+      color: var(--er-foreground);
+      box-shadow: 0 1px 2px rgba(0,0,0,0.03);
+    }
+    .er-modal .er-btn:not(.primary):hover {
+      background: var(--er-muted);
+      border-color: var(--er-border);
+    }
+
+    .er-modal .er-btn.primary {
+      background: var(--er-primary);
+      color: white;
+      box-shadow: 0 4px 12px hsla(var(--primary, 195 100% 43%), 0.25);
+    }
+    .er-modal .er-btn.primary:hover {
+      transform: translateY(-1px);
+      box-shadow: 0 6px 16px hsla(var(--primary, 195 100% 43%), 0.35);
+      filter: brightness(1.1);
+    }
+    .er-modal .er-btn.primary:active {
+      transform: translateY(0);
+      box-shadow: 0 2px 6px hsla(var(--primary, 195 100% 43%), 0.25);
+    }
+    .er-modal .er-btn:disabled {
+      opacity: 0.6;
+      cursor: not-allowed;
+      transform: none !important;
+    }
+
+    .er-modal .er-icon-btn { 
+      border-radius: 8px; 
+      padding: 8px; 
+      color: var(--er-muted-foreground);
+    }
+    .er-modal .er-icon-btn:hover { 
+      background: hsla(var(--muted, 210 20% 96%), 1); 
+      color: var(--er-foreground);
+    }
+
+    @keyframes er-modal-scale {
+      from { opacity: 0; transform: scale(0.96); }
+      to { opacity: 1; transform: scale(1); }
+    }
   `;
   return style;
 }
@@ -287,6 +662,7 @@ export function initErrorReporter(config: ErrorReporterConfig): ErrorReporterAPI
       close: `<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M18 6 6 18"/><path d="m6 6 12 12"/></svg>`,
       minimize: `<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12h14"/></svg>`,
       send: `<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m22 2-7 20-4-9-9-4Z"/><path d="M22 2 11 13"/></svg>`,
+      settings: `<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 15.5A3.5 3.5 0 1 0 12 8.5a3.5 3.5 0 0 0 0 7z"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06A1.65 1.65 0 0 0 4.6 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06A1.65 1.65 0 0 0 9 4.6a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09A1.65 1.65 0 0 0 15 4.6a1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9c.28.53.5 1.1.5 1.69V11a1 1 0 0 0 1 1h.1a2 2 0 0 1 0 4H21a1 1 0 0 0-1 1v.1c0 .59-.22 1.16-.6 1.69z"/></svg>`,
     };
     return icons[name] || "";
   };
@@ -303,16 +679,82 @@ export function initErrorReporter(config: ErrorReporterConfig): ErrorReporterAPI
     createEl("div", { class: "er-header-actions" }, [
       createEl(
         "button",
+        { class: "er-icon-btn", "aria-label": "Settings" },
+        [],
+      ),
+      createEl(
+        "button",
         { class: "er-icon-btn", "aria-label": "Minimize" },
         [],
       ),
       createEl("button", { class: "er-icon-btn", "aria-label": "Close" }, []),
     ]),
   ]);
+  header.querySelector('[aria-label="Settings"]')!.innerHTML =
+    getIcon("settings");
+  
+  // Hide settings button if project ID is already configured
+  if (readConfiguredClickUpProjectId()) {
+    header.querySelector('[aria-label="Settings"]')?.classList.add("er-hidden");
+  }
+
   header.querySelector('[aria-label="Minimize"]')!.innerHTML =
     getIcon("minimize");
   header.querySelector('[aria-label="Close"]')!.innerHTML = getIcon("close");
   widget.appendChild(header);
+
+  const modalOverlay = createEl("div", { class: "er-modal-overlay er-hidden" });
+  const modal = createEl("div", { class: "er-modal" });
+  const modalHeader = createEl("div", { class: "er-modal-header" }, [
+    createEl("div", { class: "er-modal-title" }, [
+      createEl("span", { class: "er-modal-icon", "aria-hidden": "true" }),
+      createEl("div", { class: "er-modal-title-text" }, [
+        createEl("span", {}, [text("ClickUp Project ID")]),
+      ]),
+    ]),
+    createEl("button", { class: "er-icon-btn", "aria-label": "Close Settings" }),
+  ]);
+  modalHeader.querySelector('[aria-label="Close Settings"]')!.innerHTML =
+    getIcon("close");
+  (modalHeader.querySelector(".er-modal-icon") as HTMLElement).innerHTML =
+    getIcon("settings");
+  modal.appendChild(modalHeader);
+
+  const modalBody = createEl("div", { class: "er-body" });
+  modalBody.appendChild(
+    createEl("div", { class: "er-hint-row" }, [
+      createEl("label", { class: "er-label" }, [text("Project ID")]),
+    ]),
+  );
+  const clickUpProjectIdInput = createEl("input", {
+    class: "er-input",
+    type: "text",
+    inputmode: "numeric",
+    placeholder: "Enter your ClickUp Project ID…",
+  }) as HTMLInputElement;
+  modalBody.appendChild(clickUpProjectIdInput);
+  modalBody.appendChild(
+    createEl("div", { class: "er-help" }, [
+      text("Press Enter or click Save. This value is stored and reused automatically."),
+    ]),
+  );
+  const modalInlineStatus = createEl("div", { class: "er-inline-status" }, [
+    text(""),
+  ]);
+  modalBody.appendChild(modalInlineStatus);
+  modal.appendChild(modalBody);
+
+  const modalFooter = createEl("div", { class: "er-footer" });
+  const modalCancel = createEl("button", { class: "er-btn" }, [text("Cancel")]);
+  const modalSave = createEl("button", { class: "er-btn primary" }, [
+    text("Save"),
+  ]) as HTMLButtonElement;
+  modalFooter.appendChild(modalCancel);
+  modalFooter.appendChild(modalSave);
+  modal.appendChild(modalFooter);
+
+  modalOverlay.appendChild(modal);
+  document.body.appendChild(modalOverlay);
 
   const body = createEl("div", { class: "er-body" });
 
@@ -376,9 +818,58 @@ export function initErrorReporter(config: ErrorReporterConfig): ErrorReporterAPI
     }
   }
 
+  function setModalStatus(msg: string | null) {
+    modalInlineStatus.textContent = msg || "";
+  }
+
+  function closeModal() {
+    modalOverlay.classList.add("er-hidden");
+    setModalStatus(null);
+  }
+
+  function openModal() {
+    const current = readConfiguredClickUpProjectId();
+    clickUpProjectIdInput.value = current || "";
+    modalOverlay.classList.remove("er-hidden");
+    setModalStatus(null);
+    setTimeout(() => clickUpProjectIdInput.focus(), 0);
+  }
+
+  async function saveClickUpProjectId() {
+    const value = clickUpProjectIdInput.value.trim();
+    try {
+      if (value) localStorage.setItem(CLICKUP_PROJECT_ID_ENV, value);
+      else localStorage.removeItem(CLICKUP_PROJECT_ID_ENV);
+    } catch {}
+
+    modalSave.disabled = true;
+    setModalStatus("Saving...");
+    const res = await writeDotEnvVariable(CLICKUP_PROJECT_ID_ENV, value);
+    modalSave.disabled = false;
+
+    if (res.ok) {
+      setModalStatus("Saved to .env");
+      header.querySelector('[aria-label="Settings"]')?.classList.add("er-hidden");
+      setTimeout(() => closeModal(), 700);
+      return;
+    }
+
+    if (res.error === "dotEnvWriteUnavailable") {
+      setModalStatus("Saved locally");
+      header.querySelector('[aria-label="Settings"]')?.classList.add("er-hidden");
+      setTimeout(() => closeModal(), 700);
+      return;
+    }
+
+    setModalStatus("Saved locally (.env write failed)");
+    header.querySelector('[aria-label="Settings"]')?.classList.add("er-hidden");
+    setTimeout(() => closeModal(), 900);
+  }
+
   async function submitReport() {
+    const configuredProjectKey = readConfiguredClickUpProjectId();
     const payload: ErrorReportPayload = {
-      project_key: deriveProjectKey(),
+      project_key: configuredProjectKey || deriveProjectKey(),
       module: deriveModule(),
       tab: deriveTab(),
       description: desc.value.trim(),
@@ -460,6 +951,13 @@ export function initErrorReporter(config: ErrorReporterConfig): ErrorReporterAPI
       updateVisibility();
     });
 
+  header
+    .querySelector('button[aria-label="Settings"]')!
+    .addEventListener("click", (e) => {
+      e.stopPropagation();
+      openModal();
+    });
+
   cancel.addEventListener("click", () => {
     visible = false;
     updateVisibility();
@@ -469,11 +967,30 @@ export function initErrorReporter(config: ErrorReporterConfig): ErrorReporterAPI
     if (!loading) submitReport();
   });
 
+  modalOverlay.addEventListener("mousedown", (e) => {
+    if (e.target === modalOverlay) closeModal();
+  });
+  modalCancel.addEventListener("click", () => closeModal());
+  modalHeader
+    .querySelector('button[aria-label="Close Settings"]')!
+    .addEventListener("click", () => closeModal());
+  modalSave.addEventListener("click", () => saveClickUpProjectId());
+  clickUpProjectIdInput.addEventListener("keydown", (e) => {
+    if (e.key === "Enter") saveClickUpProjectId();
+    if (e.key === "Escape") closeModal();
+  });
+  document.addEventListener("keydown", (e) => {
+    if (e.key === "Escape") closeModal();
+  });
+
   // Drag logic
   let dragging = false,
     offsetX = 0,
     offsetY = 0;
   header.addEventListener("mousedown", (e) => {
+    if (e.button !== 0) return;
+    const target = e.target as HTMLElement | null;
+    if (target?.closest("button")) return;
     dragging = true;
     const rect = root.getBoundingClientRect();
     offsetX = e.clientX - rect.left;
