@@ -15,6 +15,7 @@ type ErrorReportPayload = {
   tab: string;
   description: string;
   reported_by: string;
+  clickup_task_id?: string;
 };
 
 type ErrorReporterAPI = {
@@ -55,6 +56,7 @@ function deriveReportedBy() {
 
 const CLICKUP_PROJECT_ID_ENV = "VITE_CLICKUP_PROJECT_ID";
 const CLICKUP_PROJECT_ID_ENV_FALLBACK = "VITE_CLICKUP_PROJECT_ID";
+const CLICKUP_TASK_ID_KEY = " VITE_CLICKUP_TASK_ID";
 
 function readRuntimeEnv(name: string): string | null {
   try {
@@ -693,8 +695,8 @@ export function initErrorReporter(config: ErrorReporterConfig): ErrorReporterAPI
   header.querySelector('[aria-label="Settings"]')!.innerHTML =
     getIcon("settings");
   
-  // Hide settings button if project ID is already configured
-  if (readConfiguredClickUpProjectId()) {
+  // Hide settings button if BOTH project ID and task ID are already configured
+  if (readConfiguredClickUpProjectId() && localStorage.getItem(CLICKUP_TASK_ID_KEY)) {
     header.querySelector('[aria-label="Settings"]')?.classList.add("er-hidden");
   }
 
@@ -721,6 +723,8 @@ export function initErrorReporter(config: ErrorReporterConfig): ErrorReporterAPI
   modal.appendChild(modalHeader);
 
   const modalBody = createEl("div", { class: "er-body" });
+  
+  // Project ID Field
   modalBody.appendChild(
     createEl("div", { class: "er-hint-row" }, [
       createEl("label", { class: "er-label" }, [text("Project ID")]),
@@ -733,9 +737,23 @@ export function initErrorReporter(config: ErrorReporterConfig): ErrorReporterAPI
     placeholder: "Enter your ClickUp Project ID…",
   }) as HTMLInputElement;
   modalBody.appendChild(clickUpProjectIdInput);
+
+  // ClickUp Task ID Field
+  modalBody.appendChild(
+    createEl("div", { class: "er-hint-row" }, [
+      createEl("label", { class: "er-label" }, [text("ClickUp Task ID")]),
+    ]),
+  );
+  const clickUpTaskIdInput = createEl("input", {
+    class: "er-input",
+    type: "text",
+    placeholder: "Enter associated ClickUp Task ID…",
+  }) as HTMLInputElement;
+  modalBody.appendChild(clickUpTaskIdInput);
+
   modalBody.appendChild(
     createEl("div", { class: "er-help" }, [
-      text("Press Enter or click Save. This value is stored and reused automatically."),
+      text("Values are stored locally and reused automatically."),
     ]),
   );
   const modalInlineStatus = createEl("div", { class: "er-inline-status" }, [
@@ -828,52 +846,82 @@ export function initErrorReporter(config: ErrorReporterConfig): ErrorReporterAPI
   }
 
   function openModal() {
-    const current = readConfiguredClickUpProjectId();
-    clickUpProjectIdInput.value = current || "";
+    const currentProjectId = readConfiguredClickUpProjectId();
+    clickUpProjectIdInput.value = currentProjectId || "";
+    
+    const currentTaskId = localStorage.getItem(CLICKUP_TASK_ID_KEY);
+    clickUpTaskIdInput.value = currentTaskId || "";
+
     modalOverlay.classList.remove("er-hidden");
     setModalStatus(null);
     setTimeout(() => clickUpProjectIdInput.focus(), 0);
   }
 
-  async function saveClickUpProjectId() {
-    const value = clickUpProjectIdInput.value.trim();
+  async function saveSettings() {
+    const projectId = clickUpProjectIdInput.value.trim();
+    const taskId = clickUpTaskIdInput.value.trim();
+
+    if (!projectId || !taskId) {
+      setModalStatus("Both Project ID and Task ID are required");
+      return;
+    }
+
+    // Save Task ID to localStorage
+    if (taskId) {
+      localStorage.setItem(CLICKUP_TASK_ID_KEY, taskId);
+    } else {
+      localStorage.removeItem(CLICKUP_TASK_ID_KEY);
+    }
+
     try {
-      if (value) localStorage.setItem(CLICKUP_PROJECT_ID_ENV, value);
+      if (projectId) localStorage.setItem(CLICKUP_PROJECT_ID_ENV, projectId);
       else localStorage.removeItem(CLICKUP_PROJECT_ID_ENV);
     } catch {}
 
     modalSave.disabled = true;
     setModalStatus("Saving...");
-    const res = await writeDotEnvVariable(CLICKUP_PROJECT_ID_ENV, value);
+    
+    // We only try to write Project ID to .env as Task ID is purely local
+    const res = await writeDotEnvVariable(CLICKUP_PROJECT_ID_ENV, projectId);
     modalSave.disabled = false;
 
     if (res.ok) {
       setModalStatus("Saved to .env");
-      header.querySelector('[aria-label="Settings"]')?.classList.add("er-hidden");
+      // Only hide settings button if BOTH are configured
+      if (projectId && taskId) {
+        header.querySelector('[aria-label="Settings"]')?.classList.add("er-hidden");
+      }
       setTimeout(() => closeModal(), 700);
       return;
     }
 
     if (res.error === "dotEnvWriteUnavailable") {
       setModalStatus("Saved locally");
-      header.querySelector('[aria-label="Settings"]')?.classList.add("er-hidden");
+      if (projectId && taskId) {
+        header.querySelector('[aria-label="Settings"]')?.classList.add("er-hidden");
+      }
       setTimeout(() => closeModal(), 700);
       return;
     }
 
     setModalStatus("Saved locally (.env write failed)");
-    header.querySelector('[aria-label="Settings"]')?.classList.add("er-hidden");
+    if (projectId && taskId) {
+      header.querySelector('[aria-label="Settings"]')?.classList.add("er-hidden");
+    }
     setTimeout(() => closeModal(), 900);
   }
 
   async function submitReport() {
     const configuredProjectKey = readConfiguredClickUpProjectId();
+    const storedTaskId = localStorage.getItem(CLICKUP_TASK_ID_KEY) || undefined;
+    
     const payload: ErrorReportPayload = {
       project_key: configuredProjectKey || deriveProjectKey(),
       module: deriveModule(),
       tab: deriveTab(),
       description: desc.value.trim(),
       reported_by: deriveReportedBy(),
+      clickup_task_id: storedTaskId,
     };
 
     if (!payload.description) {
@@ -974,9 +1022,13 @@ export function initErrorReporter(config: ErrorReporterConfig): ErrorReporterAPI
   modalHeader
     .querySelector('button[aria-label="Close Settings"]')!
     .addEventListener("click", () => closeModal());
-  modalSave.addEventListener("click", () => saveClickUpProjectId());
+  modalSave.addEventListener("click", () => saveSettings());
   clickUpProjectIdInput.addEventListener("keydown", (e) => {
-    if (e.key === "Enter") saveClickUpProjectId();
+    if (e.key === "Enter") saveSettings();
+    if (e.key === "Escape") closeModal();
+  });
+  clickUpTaskIdInput.addEventListener("keydown", (e) => {
+    if (e.key === "Enter") saveSettings();
     if (e.key === "Escape") closeModal();
   });
   document.addEventListener("keydown", (e) => {
