@@ -58,7 +58,7 @@ function deriveReportedBy() {
 
 const CLICKUP_PROJECT_ID_ENV = "VITE_CLICKUP_PROJECT_ID";
 const CLICKUP_PROJECT_ID_ENV_FALLBACK = "VITE_CLICKUP_PROJECT_ID";
-const CLICKUP_TASK_ID_KEY = " VITE_CLICKUP_TASK_ID";
+const CLICKUP_TASK_ID_KEY = "VITE_CLICKUP_TASK_ID";
 
 function readRuntimeEnv(name: string): string | null {
   try {
@@ -149,6 +149,20 @@ function readConfiguredClickUpProjectId(): string | null {
     const fromStorage =
       localStorage.getItem(CLICKUP_PROJECT_ID_ENV) ||
       localStorage.getItem(CLICKUP_PROJECT_ID_ENV_FALLBACK);
+    return fromStorage?.trim() || null;
+  } catch {
+    return null;
+  }
+}
+
+function readConfiguredClickUpTaskId(): string | null {
+  const name = CLICKUP_TASK_ID_KEY;
+  const fromRuntime = readRuntimeEnv(name);
+  if (fromRuntime?.trim()) return fromRuntime.trim();
+  const fromDotEnv = readDotEnvVariable(name);
+  if (fromDotEnv?.trim()) return fromDotEnv.trim();
+  try {
+    const fromStorage = localStorage.getItem(name);
     return fromStorage?.trim() || null;
   } catch {
     return null;
@@ -698,8 +712,7 @@ export function initErrorReporter(config: ErrorReporterConfig): ErrorReporterAPI
   header.querySelector('[aria-label="Settings"]')!.innerHTML =
     getIcon("settings");
   
-  // Hide settings button if BOTH project ID and task ID are already configured
-  if (readConfiguredClickUpProjectId() && localStorage.getItem(CLICKUP_TASK_ID_KEY)) {
+  if (readConfiguredClickUpProjectId() && readConfiguredClickUpTaskId()) {
     header.querySelector('[aria-label="Settings"]')?.classList.add("er-hidden");
   }
 
@@ -886,7 +899,7 @@ export function initErrorReporter(config: ErrorReporterConfig): ErrorReporterAPI
     const currentProjectId = readConfiguredClickUpProjectId();
     clickUpProjectIdInput.value = currentProjectId || "";
     
-    const currentTaskId = localStorage.getItem(CLICKUP_TASK_ID_KEY);
+    const currentTaskId = readConfiguredClickUpTaskId();
     clickUpTaskIdInput.value = currentTaskId || "";
 
     modalOverlay.classList.remove("er-hidden");
@@ -918,11 +931,11 @@ export function initErrorReporter(config: ErrorReporterConfig): ErrorReporterAPI
     modalSave.disabled = true;
     setModalStatus("Saving...");
     
-    // We only try to write Project ID to .env as Task ID is purely local
     const res = await writeDotEnvVariable(CLICKUP_PROJECT_ID_ENV, projectId);
+    const resTask = await writeDotEnvVariable(CLICKUP_TASK_ID_KEY, taskId);
     modalSave.disabled = false;
 
-    if (res.ok) {
+    if (res.ok && resTask.ok) {
       setModalStatus("Saved to .env");
       // Only hide settings button if BOTH are configured
       if (projectId && taskId) {
@@ -932,7 +945,7 @@ export function initErrorReporter(config: ErrorReporterConfig): ErrorReporterAPI
       return;
     }
 
-    if (res.error === "dotEnvWriteUnavailable") {
+    if (res.error === "dotEnvWriteUnavailable" || resTask.error === "dotEnvWriteUnavailable") {
       setModalStatus("Saved locally");
       if (projectId && taskId) {
         header.querySelector('[aria-label="Settings"]')?.classList.add("er-hidden");
@@ -950,7 +963,7 @@ export function initErrorReporter(config: ErrorReporterConfig): ErrorReporterAPI
 
   async function submitReport() {
     const configuredProjectKey = readConfiguredClickUpProjectId();
-    const storedTaskId = localStorage.getItem(CLICKUP_TASK_ID_KEY) || undefined;
+    const configuredTaskId = readConfiguredClickUpTaskId() || undefined;
     
     const selectedUrgency =
       (slaSelect.value as "urgent" | "normal" | "not urgent") || "normal";
@@ -975,7 +988,7 @@ export function initErrorReporter(config: ErrorReporterConfig): ErrorReporterAPI
       description: desc.value.trim(),
       reported_by: email,
       reported_by_name: name,
-      clickup_task_id: storedTaskId,
+      clickup_task_id: configuredTaskId,
       sla_urgency: selectedUrgency,
     };
 
