@@ -15,6 +15,7 @@ type ErrorReportPayload = {
   tab: string;
   description: string;
   reported_by: string;
+  reported_by_name: string;
   clickup_task_id?: string;
   sla_urgency: "urgent" | "normal" | "not urgent";
 };
@@ -787,6 +788,30 @@ export function initErrorReporter(config: ErrorReporterConfig): ErrorReporterAPI
   ]);
   body.appendChild(typeSelect);
 
+  body.appendChild(createEl("label", { class: "er-label" }, [text("Email")]));
+  const emailInput = createEl("input", {
+    class: "er-input",
+    type: "email",
+    placeholder: "Enter your email…",
+  }) as HTMLInputElement;
+  try {
+    const storedEmail = localStorage.getItem("tixly_user_email");
+    if (storedEmail) emailInput.value = storedEmail;
+  } catch {}
+  body.appendChild(emailInput);
+
+  body.appendChild(createEl("label", { class: "er-label" }, [text("Name")]));
+  const nameInput = createEl("input", {
+    class: "er-input",
+    type: "text",
+    placeholder: "Enter your name…",
+  }) as HTMLInputElement;
+  try {
+    const storedName = localStorage.getItem("tixly_user_name");
+    if (storedName) nameInput.value = storedName;
+  } catch {}
+  body.appendChild(nameInput);
+
   body.appendChild(
     createEl("label", { class: "er-label" }, [text("SLA Urgency")]),
   );
@@ -929,13 +954,27 @@ export function initErrorReporter(config: ErrorReporterConfig): ErrorReporterAPI
     
     const selectedUrgency =
       (slaSelect.value as "urgent" | "normal" | "not urgent") || "normal";
+    const email = (emailInput.value || "").trim();
+    const isValidEmail = /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email);
+    if (!isValidEmail) {
+      showStatus("Please enter a valid email", "error");
+      return;
+    }
+    try {
+      localStorage.setItem("tixly_user_email", email);
+    } catch {}
+    const name = (nameInput.value || "").trim() || deriveReportedBy();
+    try {
+      if (name) localStorage.setItem("tixly_user_name", name);
+    } catch {}
 
     const payload: ErrorReportPayload = {
       project_key: configuredProjectKey || deriveProjectKey(),
       module: deriveModule(),
       tab: deriveTab(),
       description: desc.value.trim(),
-      reported_by: deriveReportedBy(),
+      reported_by: email,
+      reported_by_name: name,
       clickup_task_id: storedTaskId,
       sla_urgency: selectedUrgency,
     };
