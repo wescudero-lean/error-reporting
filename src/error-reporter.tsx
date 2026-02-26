@@ -16,6 +16,7 @@ type ErrorReportPayload = {
   description: string;
   reported_by: string;
   clickup_task_id?: string;
+  sla_urgency: "urgent" | "normal" | "not urgent";
 };
 
 type ErrorReporterAPI = {
@@ -256,7 +257,6 @@ async function fetchWithRetry(
         headers: { "Content-Type": "application/json", apikey: apiKey },
         body: JSON.stringify(payload),
       });
-      if (!res.ok) throw new Error(`HTTP ${res.status}`);
       return res;
     } catch (e) {
       lastErr = e;
@@ -623,6 +623,8 @@ function renderStyles(): HTMLStyleElement {
       color: var(--er-foreground);
     }
 
+    
+
     @keyframes er-modal-scale {
       from { opacity: 0; transform: scale(0.96); }
       to { opacity: 1; transform: scale(1); }
@@ -786,6 +788,16 @@ export function initErrorReporter(config: ErrorReporterConfig): ErrorReporterAPI
   body.appendChild(typeSelect);
 
   body.appendChild(
+    createEl("label", { class: "er-label" }, [text("SLA Urgency")]),
+  );
+  const slaSelect = createEl("select", { class: "er-input" }, [
+    createEl("option", { value: "urgent" }, [text("urgent")]),
+    createEl("option", { value: "normal", selected: "true" }, [text("normal")]),
+    createEl("option", { value: "not urgent" }, [text("not urgent")]),
+  ]) as HTMLSelectElement;
+  body.appendChild(slaSelect);
+
+  body.appendChild(
     createEl("label", { class: "er-label" }, [text("Description")]),
   );
   const desc = createEl("textarea", {
@@ -915,6 +927,9 @@ export function initErrorReporter(config: ErrorReporterConfig): ErrorReporterAPI
     const configuredProjectKey = readConfiguredClickUpProjectId();
     const storedTaskId = localStorage.getItem(CLICKUP_TASK_ID_KEY) || undefined;
     
+    const selectedUrgency =
+      (slaSelect.value as "urgent" | "normal" | "not urgent") || "normal";
+
     const payload: ErrorReportPayload = {
       project_key: configuredProjectKey || deriveProjectKey(),
       module: deriveModule(),
@@ -922,6 +937,7 @@ export function initErrorReporter(config: ErrorReporterConfig): ErrorReporterAPI
       description: desc.value.trim(),
       reported_by: deriveReportedBy(),
       clickup_task_id: storedTaskId,
+      sla_urgency: selectedUrgency,
     };
 
     if (!payload.description) {
@@ -939,8 +955,13 @@ export function initErrorReporter(config: ErrorReporterConfig): ErrorReporterAPI
         payload,
         API_KEY,
       );
-
-      const data = await res.json();
+      let data: any;
+      try {
+        data = await res.json();
+      } catch {
+        const txt = await res.text().catch(() => "");
+        data = { success: false, error: txt || `HTTP ${res.status}` };
+      }
 
       if (data.success) {
         showStatus("Message sent", "success");
@@ -950,17 +971,22 @@ export function initErrorReporter(config: ErrorReporterConfig): ErrorReporterAPI
           updateVisibility();
         }, 2000);
       } else {
-        // Extract error message from structured response
-        let msg = data.error || "Failed to send report";
-        if (data.details && data.details[0]) {
+        let msg = "";
+        if (Array.isArray(data.errors) && data.errors.length) {
+          msg = String(data.errors[0]);
+        } else if (Array.isArray(data.details) && data.details.length) {
           const detail = data.details[0];
+          msg = typeof detail === "string" ? detail : String(detail);
           if (typeof detail === "string" && detail.includes("error:")) {
             msg = detail.split("error:")[1].trim().replace(/["{}]/g, "");
-          } else {
-            msg = detail;
           }
+        } else if (typeof data.error === "string" && data.error.trim()) {
+          msg = data.error.trim();
+        } else {
+          msg = "Failed to send report";
         }
-        throw new Error(msg);
+        if (msg.length > 60) msg = msg.substring(0, 57) + "...";
+        showStatus(msg, "error");
       }
     } catch (e: any) {
       let errorMsg = e.message || "Could not send report";
