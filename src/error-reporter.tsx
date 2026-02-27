@@ -18,6 +18,7 @@ type ErrorReportPayload = {
   reported_by_name: string;
   clickup_task_id?: string;
   sla_urgency: "urgent" | "normal" | "not urgent";
+  pm_board_id?: string;
 };
 
 type ErrorReporterAPI = {
@@ -59,6 +60,7 @@ function deriveReportedBy() {
 const CLICKUP_PROJECT_ID_ENV = "VITE_CLICKUP_PROJECT_ID";
 const CLICKUP_PROJECT_ID_ENV_FALLBACK = "VITE_CLICKUP_PROJECT_ID";
 const CLICKUP_TASK_ID_KEY = "VITE_CLICKUP_TASK_ID";
+const PROJECT_BOARD_ID_ENV = "VITE_PROJECT_BOARD_ID";
 
 function readRuntimeEnv(name: string): string | null {
   try {
@@ -157,6 +159,20 @@ function readConfiguredClickUpProjectId(): string | null {
 
 function readConfiguredClickUpTaskId(): string | null {
   const name = CLICKUP_TASK_ID_KEY;
+  const fromRuntime = readRuntimeEnv(name);
+  if (fromRuntime?.trim()) return fromRuntime.trim();
+  const fromDotEnv = readDotEnvVariable(name);
+  if (fromDotEnv?.trim()) return fromDotEnv.trim();
+  try {
+    const fromStorage = localStorage.getItem(name);
+    return fromStorage?.trim() || null;
+  } catch {
+    return null;
+  }
+}
+
+function readConfiguredProjectBoardId(): string | null {
+  const name = PROJECT_BOARD_ID_ENV;
   const fromRuntime = readRuntimeEnv(name);
   if (fromRuntime?.trim()) return fromRuntime.trim();
   const fromDotEnv = readDotEnvVariable(name);
@@ -768,6 +784,18 @@ export function initErrorReporter(config: ErrorReporterConfig): ErrorReporterAPI
   modalBody.appendChild(clickUpTaskIdInput);
 
   modalBody.appendChild(
+    createEl("div", { class: "er-hint-row" }, [
+      createEl("label", { class: "er-label" }, [text("Project Board ID")]),
+    ]),
+  );
+  const projectBoardIdInput = createEl("input", {
+    class: "er-input",
+    type: "text",
+    placeholder: "Enter optional Project Board ID…",
+  }) as HTMLInputElement;
+  modalBody.appendChild(projectBoardIdInput);
+
+  modalBody.appendChild(
     createEl("div", { class: "er-help" }, [
       text("Values are stored locally and reused automatically."),
     ]),
@@ -901,6 +929,8 @@ export function initErrorReporter(config: ErrorReporterConfig): ErrorReporterAPI
     
     const currentTaskId = readConfiguredClickUpTaskId();
     clickUpTaskIdInput.value = currentTaskId || "";
+    const currentBoardId = readConfiguredProjectBoardId();
+    projectBoardIdInput.value = currentBoardId || "";
 
     modalOverlay.classList.remove("er-hidden");
     setModalStatus(null);
@@ -910,6 +940,7 @@ export function initErrorReporter(config: ErrorReporterConfig): ErrorReporterAPI
   async function saveSettings() {
     const projectId = clickUpProjectIdInput.value.trim();
     const taskId = clickUpTaskIdInput.value.trim();
+    const boardId = projectBoardIdInput.value.trim();
 
     if (!projectId || !taskId) {
       setModalStatus("Both Project ID and Task ID are required");
@@ -926,6 +957,8 @@ export function initErrorReporter(config: ErrorReporterConfig): ErrorReporterAPI
     try {
       if (projectId) localStorage.setItem(CLICKUP_PROJECT_ID_ENV, projectId);
       else localStorage.removeItem(CLICKUP_PROJECT_ID_ENV);
+      if (boardId) localStorage.setItem(PROJECT_BOARD_ID_ENV, boardId);
+      else localStorage.removeItem(PROJECT_BOARD_ID_ENV);
     } catch {}
 
     modalSave.disabled = true;
@@ -933,9 +966,10 @@ export function initErrorReporter(config: ErrorReporterConfig): ErrorReporterAPI
     
     const res = await writeDotEnvVariable(CLICKUP_PROJECT_ID_ENV, projectId);
     const resTask = await writeDotEnvVariable(CLICKUP_TASK_ID_KEY, taskId);
+    const resBoard = await writeDotEnvVariable(PROJECT_BOARD_ID_ENV, boardId);
     modalSave.disabled = false;
 
-    if (res.ok && resTask.ok) {
+    if (res.ok && resTask.ok && (resBoard.ok || !boardId)) {
       setModalStatus("Saved to .env");
       // Only hide settings button if BOTH are configured
       if (projectId && taskId) {
@@ -945,7 +979,11 @@ export function initErrorReporter(config: ErrorReporterConfig): ErrorReporterAPI
       return;
     }
 
-    if (res.error === "dotEnvWriteUnavailable" || resTask.error === "dotEnvWriteUnavailable") {
+    if (
+      res.error === "dotEnvWriteUnavailable" ||
+      resTask.error === "dotEnvWriteUnavailable" ||
+      resBoard.error === "dotEnvWriteUnavailable"
+    ) {
       setModalStatus("Saved locally");
       if (projectId && taskId) {
         header.querySelector('[aria-label="Settings"]')?.classList.add("er-hidden");
@@ -989,6 +1027,7 @@ export function initErrorReporter(config: ErrorReporterConfig): ErrorReporterAPI
       reported_by: email,
       reported_by_name: name,
       clickup_task_id: configuredTaskId,
+      pm_board_id: readConfiguredProjectBoardId() || undefined,
       sla_urgency: selectedUrgency,
     };
 
